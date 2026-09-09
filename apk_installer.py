@@ -11,6 +11,7 @@ import sys
 import subprocess
 import threading
 import queue
+import zipfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
@@ -201,7 +202,27 @@ class ApkInstallerApp:
             return
         self._set_apk_path(path)
 
+    def _is_valid_apk(self, path):
+        # APKファイルの実体はZIPアーカイブで、中に AndroidManifest.xml を含む。
+        # 拡張子が .apk でも中身が壊れている／別ファイルというケースを弾くための簡易チェック
+        # （aaptなどを使った厳密な検証ではないが、明らかに違うファイルは検出できる）
+        try:
+            if not zipfile.is_zipfile(path):
+                return False
+            with zipfile.ZipFile(path) as zf:
+                return "AndroidManifest.xml" in zf.namelist()
+        except (OSError, zipfile.BadZipFile):
+            return False
+
     def _set_apk_path(self, path):
+        if not self._is_valid_apk(path):
+            messagebox.showerror(
+                "エラー",
+                "選択されたファイルは有効なAPKファイルではないようです。\n中身が壊れているか、APK以外のファイルの可能性があります。",
+            )
+            self._log(f"[エラー] 無効なAPKファイルが選択されました: {path}")
+            return
+
         self.apk_path.set(path)
         self.apk_label.configure(text=path)
         self._log(f"APKファイルを選択しました: {path}")
@@ -256,7 +277,15 @@ class ApkInstallerApp:
                 devices.append((serial, model))
             elif len(parts) >= 2:
                 # unauthorized（未許可）や offline の端末はログに情報だけ出しておく
-                self._log(f"[注意] {parts[0]} は状態 '{parts[1]}' のため一覧から除外しました。")
+                serial, status = parts[0], parts[1]
+                self._log(f"[注意] {serial} は状態 '{status}' のため一覧から除外しました。")
+                if status == "unauthorized":
+                    # 非エンジニアでも対処できるよう、具体的な操作方法を添えておく
+                    self._log(
+                        f"　→ {serial} の端末画面に表示されている"
+                        "「USBデバッグを許可しますか？」のダイアログで「許可」をタップしてから、"
+                        "もう一度「デバイスリスト更新」を押してください。"
+                    )
 
         # GUIの更新は必ずメインスレッド（Tkinterのイベントループ）から行う
         self.root.after(0, self._update_device_list, devices)
