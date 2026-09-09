@@ -67,6 +67,9 @@ class ApkInstallerApp:
         # 起動時にadbバイナリが存在するかチェックしておく
         self._check_adb_exists()
 
+        # 書き込み中にウィンドウを閉じようとした場合は確認ダイアログを出す
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
     # ------------------------------------------------------------------
     # 画面構築
     # ------------------------------------------------------------------
@@ -75,8 +78,8 @@ class ApkInstallerApp:
         apk_frame = ttk.LabelFrame(self.root, text="1. APKファイルの選択")
         apk_frame.pack(fill="x", padx=10, pady=(10, 5))
 
-        select_btn = ttk.Button(apk_frame, text="APKファイルを選択", command=self.select_apk_file)
-        select_btn.pack(side="left", padx=10, pady=10)
+        self.select_apk_btn = ttk.Button(apk_frame, text="APKファイルを選択", command=self.select_apk_file)
+        self.select_apk_btn.pack(side="left", padx=10, pady=10)
 
         # 選択中のAPKパスを表示するラベル（ドラッグ&ドロップの受け皿も兼ねる）
         self.apk_label = ttk.Label(
@@ -105,14 +108,17 @@ class ApkInstallerApp:
         device_btn_frame = ttk.Frame(device_frame)
         device_btn_frame.pack(fill="x", padx=10, pady=(10, 5))
 
-        refresh_btn = ttk.Button(device_btn_frame, text="デバイスリスト更新", command=self.refresh_devices)
-        refresh_btn.pack(side="left")
+        self.refresh_btn = ttk.Button(device_btn_frame, text="デバイスリスト更新", command=self.refresh_devices)
+        self.refresh_btn.pack(side="left")
 
-        select_all_btn = ttk.Button(device_btn_frame, text="すべて選択", command=self.select_all_devices)
-        select_all_btn.pack(side="left", padx=5)
+        self.select_all_btn = ttk.Button(device_btn_frame, text="すべて選択", command=self.select_all_devices)
+        self.select_all_btn.pack(side="left", padx=5)
 
-        deselect_all_btn = ttk.Button(device_btn_frame, text="すべて解除", command=self.deselect_all_devices)
-        deselect_all_btn.pack(side="left")
+        self.deselect_all_btn = ttk.Button(device_btn_frame, text="すべて解除", command=self.deselect_all_devices)
+        self.deselect_all_btn.pack(side="left")
+
+        # 書き込み中はデバイスのチェックボックスも操作できないようにするため、参照を保持しておく
+        self.device_checkbuttons = []
 
         # デバイスのチェックボックスを並べるためのスクロール可能エリア
         list_container = ttk.Frame(device_frame)
@@ -202,6 +208,9 @@ class ApkInstallerApp:
     # 2. デバイス一覧表示と選択
     # ------------------------------------------------------------------
     def refresh_devices(self):
+        # 更新中に連打されたり、書き込みが始まったりすると表示と状態が食い違うため、
+        # 完了するまで画面上の操作をロックする（書き込み完了時と同じ仕組みを流用）
+        self._set_controls_enabled(False)
         # adb devices はネットワークやUSB列挙待ちで時間がかかることがあるため、
         # GUIが固まらないようバックグラウンドスレッドで実行する
         threading.Thread(target=self._refresh_devices_thread, daemon=True).start()
@@ -217,9 +226,11 @@ class ApkInstallerApp:
             )
         except FileNotFoundError:
             self._log("[エラー] adbバイナリが見つかりません。配置場所を確認してください。")
+            self.root.after(0, lambda: self._set_controls_enabled(True))
             return
         except subprocess.TimeoutExpired:
             self._log("[エラー] adb devices がタイムアウトしました。")
+            self.root.after(0, lambda: self._set_controls_enabled(True))
             return
 
         # 出力例（-l オプションで機種名などの詳細も付与される）:
@@ -249,24 +260,34 @@ class ApkInstallerApp:
         self.root.after(0, self._update_device_list, devices)
 
     def _update_device_list(self, devices):
+        # 更新前のチェック状態を覚えておき、再検出後も同じ端末なら選択状態を引き継ぐ
+        previous_checked = {
+            serial for serial, var in self.device_vars.items() if var.get()
+        }
+
         # 一旦既存のチェックボックスを全部消してから作り直す
         for widget in self.device_list_frame.winfo_children():
             widget.destroy()
         self.device_vars.clear()
+        self.device_checkbuttons = []
 
         if not devices:
             ttk.Label(self.device_list_frame, text="接続されているデバイスがありません。").pack(anchor="w")
             self._log("接続中のデバイスは見つかりませんでした。")
-            return
+        else:
+            for serial, model in devices:
+                # 書き込み対象の判定はシリアル番号で行うが、表示上は機種名も併記する
+                label = f"{serial} ({model})" if model else serial
+                var = tk.BooleanVar(value=(serial in previous_checked))
+                self.device_vars[serial] = var
+                checkbutton = ttk.Checkbutton(self.device_list_frame, text=label, variable=var)
+                checkbutton.pack(anchor="w", padx=5, pady=2)
+                self.device_checkbuttons.append(checkbutton)
 
-        for serial, model in devices:
-            # 書き込み対象の判定はシリアル番号で行うが、表示上は機種名も併記する
-            label = f"{serial} ({model})" if model else serial
-            var = tk.BooleanVar(value=False)
-            self.device_vars[serial] = var
-            ttk.Checkbutton(self.device_list_frame, text=label, variable=var).pack(anchor="w", padx=5, pady=2)
+            self._log(f"{len(devices)} 台のデバイスを検出しました。")
 
-        self._log(f"{len(devices)} 台のデバイスを検出しました。")
+        # 更新が終わったので操作ロックを解除する
+        self._set_controls_enabled(True)
 
     def select_all_devices(self):
         for var in self.device_vars.values():
@@ -275,6 +296,17 @@ class ApkInstallerApp:
     def deselect_all_devices(self):
         for var in self.device_vars.values():
             var.set(False)
+
+    def _set_controls_enabled(self, enabled):
+        # 書き込み中は誤操作を防ぐため、APK選択・デバイス一覧関連・書き込みボタンをまとめて無効化する
+        state = "normal" if enabled else "disabled"
+        self.select_apk_btn.configure(state=state)
+        self.refresh_btn.configure(state=state)
+        self.select_all_btn.configure(state=state)
+        self.deselect_all_btn.configure(state=state)
+        self.install_btn.configure(state=state)
+        for checkbutton in self.device_checkbuttons:
+            checkbutton.configure(state=state)
 
     # ------------------------------------------------------------------
     # 3. 書き込み（インストール）実行
@@ -294,8 +326,9 @@ class ApkInstallerApp:
             messagebox.showerror("エラー", f"adbバイナリが見つかりません。\n想定パス: {ADB_PATH}")
             return
 
-        # 実行中は誤って連打されないようボタンを無効化する
-        self.install_btn.configure(state="disabled")
+        # 書き込み中に他の操作をされると状態が食い違ってしまうため、
+        # 完了するまで画面上の操作をすべてロックする
+        self._set_controls_enabled(False)
         self.install_running_count = len(target_serials)
 
         self._log(f"===== 書き込み開始（対象 {len(target_serials)} 台） =====")
@@ -333,8 +366,18 @@ class ApkInstallerApp:
             with self.install_lock:
                 self.install_running_count -= 1
                 if self.install_running_count <= 0:
-                    self.root.after(0, lambda: self.install_btn.configure(state="normal"))
+                    self.root.after(0, lambda: self._set_controls_enabled(True))
                     self._log("===== 書き込み処理がすべて完了しました =====")
+
+    def _on_close(self):
+        # 書き込み処理が実行中の場合は、誤って中断してしまわないよう確認する
+        if self.install_running_count > 0:
+            if not messagebox.askyesno(
+                "確認",
+                "書き込み処理が実行中です。終了すると処理が中断されますが、よろしいですか？",
+            ):
+                return
+        self.root.destroy()
 
     # ------------------------------------------------------------------
     # ログ関連（ワーカースレッド → キュー → メインスレッドのテキストエリア）
