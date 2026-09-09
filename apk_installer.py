@@ -36,6 +36,9 @@ ADB_PATH = os.path.join(BASE_DIR, "adb")
 # ログ欄に保持しておく最大行数（これを超えたら古い行から削除し、メモリ肥大化を防ぐ）
 MAX_LOG_LINES = 1000
 
+# アプリのバージョン表示（画面右下に表示する）
+APP_VERSION = "1.0.0"
+
 
 class ApkInstallerApp:
     def __init__(self, root):
@@ -137,6 +140,10 @@ class ApkInstallerApp:
             install_frame, text="選択したデバイスに書き込み", command=self.install_selected
         )
         self.install_btn.pack(padx=10, pady=10)
+
+        # ===== バージョン表示（画面右下） =====
+        version_label = ttk.Label(self.root, text=f"ver {APP_VERSION}", foreground="gray")
+        version_label.pack(side="bottom", anchor="e", padx=10, pady=(0, 4))
 
         # ===== ログ表示エリア =====
         log_frame = ttk.LabelFrame(self.root, text="ログ")
