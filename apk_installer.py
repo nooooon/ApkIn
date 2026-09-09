@@ -118,7 +118,9 @@ class ApkInstallerApp:
         self.deselect_all_btn.pack(side="left")
 
         # 書き込み中はデバイスのチェックボックスも操作できないようにするため、参照を保持しておく
-        self.device_checkbuttons = []
+        # （シリアル番号 → ウィジェット。書き込み結果アイコンの反映にも使う）
+        self.device_checkbuttons = {}
+        self.device_base_labels = {}
 
         # デバイスのチェックボックスを並べるためのスクロール可能エリア
         list_container = ttk.Frame(device_frame)
@@ -269,7 +271,10 @@ class ApkInstallerApp:
         for widget in self.device_list_frame.winfo_children():
             widget.destroy()
         self.device_vars.clear()
-        self.device_checkbuttons = []
+        # シリアル番号 → チェックボックスウィジェット（書き込み結果アイコンの反映に使う）
+        self.device_checkbuttons = {}
+        # シリアル番号 → アイコンを付ける前の元ラベル文字列
+        self.device_base_labels = {}
 
         if not devices:
             ttk.Label(self.device_list_frame, text="接続されているデバイスがありません。").pack(anchor="w")
@@ -282,7 +287,8 @@ class ApkInstallerApp:
                 self.device_vars[serial] = var
                 checkbutton = ttk.Checkbutton(self.device_list_frame, text=label, variable=var)
                 checkbutton.pack(anchor="w", padx=5, pady=2)
-                self.device_checkbuttons.append(checkbutton)
+                self.device_checkbuttons[serial] = checkbutton
+                self.device_base_labels[serial] = label
 
             self._log(f"{len(devices)} 台のデバイスを検出しました。")
 
@@ -305,8 +311,17 @@ class ApkInstallerApp:
         self.select_all_btn.configure(state=state)
         self.deselect_all_btn.configure(state=state)
         self.install_btn.configure(state=state)
-        for checkbutton in self.device_checkbuttons:
+        for checkbutton in self.device_checkbuttons.values():
             checkbutton.configure(state=state)
+
+    def _set_device_status_icon(self, serial, icon):
+        # 書き込み結果に応じたアイコンを、該当デバイスのチェックボックスのラベルに付与する
+        checkbutton = self.device_checkbuttons.get(serial)
+        base_label = self.device_base_labels.get(serial)
+        if checkbutton is None or base_label is None:
+            # 書き込み中にリストが更新されて対象デバイスが消えていた場合は何もしない
+            return
+        checkbutton.configure(text=f"{base_label} {icon}" if icon else base_label)
 
     # ------------------------------------------------------------------
     # 3. 書き込み（インストール）実行
@@ -333,6 +348,10 @@ class ApkInstallerApp:
 
         self._log(f"===== 書き込み開始（対象 {len(target_serials)} 台） =====")
 
+        # 前回の書き込み結果アイコンが残っていると紛らわしいので、対象デバイスのぶんだけ消しておく
+        for serial in target_serials:
+            self._set_device_status_icon(serial, "")
+
         # 各デバイスへのインストールを、それぞれ別スレッドで並列に実行する
         for serial in target_serials:
             threading.Thread(
@@ -354,13 +373,17 @@ class ApkInstallerApp:
 
             if result.returncode == 0 and "Success" in output:
                 self._log(f"[{serial}] Success")
+                self.root.after(0, lambda: self._set_device_status_icon(serial, "✅"))
             else:
                 self._log(f"[{serial}] Failed\n{output.strip()}")
+                self.root.after(0, lambda: self._set_device_status_icon(serial, "❌"))
 
         except subprocess.TimeoutExpired:
             self._log(f"[{serial}] Failed（タイムアウトしました）")
+            self.root.after(0, lambda: self._set_device_status_icon(serial, "❌"))
         except Exception as e:
             self._log(f"[{serial}] Failed（例外発生: {e}）")
+            self.root.after(0, lambda: self._set_device_status_icon(serial, "❌"))
         finally:
             # 全デバイスの処理が完了したらボタンを再度押せるようにする
             with self.install_lock:
