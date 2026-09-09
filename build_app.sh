@@ -49,6 +49,7 @@ echo "== 5. PyInstallerでビルド =="
 "$PY" -m PyInstaller \
     --windowed \
     --name "$APP_NAME" \
+    --icon "./AppIcon.icns" \
     --add-binary "./adb:." \
     --collect-all tkinterdnd2 \
     --noconfirm \
