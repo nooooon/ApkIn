@@ -1,0 +1,17 @@
+# ビルド生成物
+build/
+dist/
+*.spec
+
+# ビルド用venv
+.venv/
+
+# Google公式adbバイナリ（サイズが大きく、配布元から都度取得すればよいため）
+adb
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
