@@ -60,6 +60,13 @@ class ApkInstallerApp:
         self.install_running_count = 0
         self.install_lock = threading.Lock()
 
+        # 実行中のadbインストールプロセス（アプリ終了時に確実に止めるために保持する）
+        self.running_procs = set()
+        self.procs_lock = threading.Lock()
+
+        # 画面操作がロックされているかどうか（ドラッグ&ドロップの受付可否にも使う）
+        self.controls_enabled = True
+
         self._build_widgets()
 
         # 100ミリ秒ごとにログキューを確認して、テキストエリアに反映する
@@ -98,9 +105,7 @@ class ApkInstallerApp:
             self.apk_label.dnd_bind("<<Drop>>", self._on_drop_apk)
         else:
             # 使えない場合はその旨を分かるようにしておく
-            self.apk_label.configure(
-                text="（tkinterdnd2未導入のためD&D無効。ボタンから選択してください）"
-            )
+            self.apk_path.set("（tkinterdnd2未導入のためD&D無効。ボタンから選択してください）")
 
         # ===== 2. デバイス一覧エリア =====
         device_frame = ttk.LabelFrame(self.root, text="2. デバイス一覧")
@@ -191,6 +196,9 @@ class ApkInstallerApp:
             self._set_apk_path(path)
 
     def _on_drop_apk(self, event):
+        # 書き込み中・更新中は他の操作と同様にドロップも無視する
+        if not self.controls_enabled:
+            return
         # ドラッグ&ドロップされたデータには複数ファイルが含まれる場合や
         # パスが {} で囲まれる場合があるため、tkinterdnd2 の splitlist で分解する
         paths = self.root.tk.splitlist(event.data)
@@ -224,7 +232,6 @@ class ApkInstallerApp:
             return
 
         self.apk_path.set(path)
-        self.apk_label.configure(text=path)
         self._log(f"APKファイルを選択しました: {path}")
 
     # ------------------------------------------------------------------
@@ -253,6 +260,11 @@ class ApkInstallerApp:
             return
         except subprocess.TimeoutExpired:
             self._log("[エラー] adb devices がタイムアウトしました。")
+            self.root.after(0, lambda: self._set_controls_enabled(True))
+            return
+        except Exception as e:
+            # 実行権限なし(PermissionError)など想定外のエラーでも、画面が操作不能にならないようにする
+            self._log(f"[エラー] adb devices の実行に失敗しました: {e}")
             self.root.after(0, lambda: self._set_controls_enabled(True))
             return
 
@@ -334,6 +346,7 @@ class ApkInstallerApp:
 
     def _set_controls_enabled(self, enabled):
         # 書き込み中は誤操作を防ぐため、APK選択・デバイス一覧関連・書き込みボタンをまとめて無効化する
+        self.controls_enabled = enabled
         state = "normal" if enabled else "disabled"
         self.select_apk_btn.configure(state=state)
         self.refresh_btn.configure(state=state)
@@ -392,15 +405,26 @@ class ApkInstallerApp:
     def _install_on_device(self, serial, apk_path):
         self._log(f"[{serial}] インストール開始...")
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 [ADB_PATH, "-s", serial, "install", "-r", apk_path],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=180,
             )
-            output = (result.stdout or "") + (result.stderr or "")
+            with self.procs_lock:
+                self.running_procs.add(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=180)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise
+            finally:
+                with self.procs_lock:
+                    self.running_procs.discard(proc)
+            output = (stdout or "") + (stderr or "")
 
-            if result.returncode == 0 and "Success" in output:
+            if proc.returncode == 0 and "Success" in output:
                 self._log(f"[{serial}] Success")
                 self.root.after(0, lambda: self._set_device_status_icon(serial, "✅"))
             else:
@@ -429,6 +453,10 @@ class ApkInstallerApp:
                 "書き込み処理が実行中です。終了すると処理が中断されますが、よろしいですか？",
             ):
                 return
+            # ウィンドウを閉じてもadbの子プロセスが裏で動き続けないよう、確実に止める
+            with self.procs_lock:
+                for proc in list(self.running_procs):
+                    proc.terminate()
         self.root.destroy()
 
     # ------------------------------------------------------------------
